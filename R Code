@@ -1,0 +1,707 @@
+#########################
+#########################
+#### Data Generation ####
+#########################
+
+library(MASS)
+library(Matrix)
+
+#### Case 1 ####
+# Data Generation #
+# 50 data sets, 20/20/200 = 240 observations, p=8 #
+# True model y=X %*% beta + sigma * epsilon, x[,i] & x[,j] with correlation 0.5^abs(i-j), beta = c( 3,1.5,0,0,2,0,0,0 ), epsilon ~ N(0,1), sigma=3 #
+
+# Create X #
+
+data.create = function( n,p,split,beta,sigma,corr ){
+	X.list = list( )
+	y.list= list()
+	
+	for (i in 1:split) {
+		X= mvrnorm( n=n, mu=rep(0,p ), Sigma=corr )
+		X.list[[i]] <- X
+		
+		epsilon =rnorm(1, mean = 0, sd = 1)
+		y = X %*% beta + sigma * epsilon
+		y.list[[i]] <- y
+	}
+	return( list(X.list=X.list, y.list=y.list) )
+}
+split=30
+n=240
+p=8
+beta = c( 3,1.5,0,0,2,0,0,0 )
+sigma =3
+corr=Diagonal( n = p, x=1 )
+for (i in 1: (p-1) ){
+	for ( j in (i+1):p ){
+		corr[i,j] = 0.5^abs(i-j)
+		corr[j,i]=corr[i,j]
+	}
+}
+
+case01.data= data.create ( n=n,p=p,split=split,beta=beta,sigma=sigma,corr=corr )
+X.list01=case01.data$X.list
+y.list01=case01.data$y.list
+
+n.train=20
+n.valid=20
+n.test=200
+
+
+### Case 2 ####
+# Data Generation #
+# 50 data sets, 100/100/100 = 300 observations, p=40 #
+# True model y=X %*% beta + sigma * epsilon, x[,i] & x[,j] with correlation 0.5, beta =c(runif(p/6, -2, 2 ), rep(0, p/6), runif(p/6, -2, 2 ), rep(0, p/6), runif(p/6, -2, 2 ),rep(0, p/6) ), 300 predictors, epsilon ~ N(0,1), sigma=5 #
+
+# Create X #
+
+data.create = function( n,p,split,beta,sigma,corr ){
+	X.list = list( )
+	y.list= list()
+	
+	for (i in 1:split) {
+		X= mvrnorm( n=n, mu=rep(0,p ), Sigma=corr )
+		X.list[[i]] <- X
+		
+		epsilon =rnorm(1, mean = 0, sd = 1)
+		y = X %*% beta + sigma * epsilon
+		y.list[[i]] <- y
+	}
+	return( list(X.list=X.list, y.list=y.list) )
+}
+split=10
+n=300
+p=300
+beta = c(runif(p/6, -2, 2 ), rep(0, p/6), runif(p/6, -2, 2 ), rep(0, p/6), runif(p/6, -2, 2 ),rep(0, p/6) )
+sigma =5
+
+n.train=100
+n.valid=100
+n.test=100
+
+corr=Diagonal( n = p, x=1 )
+corr=corr+ as.numeric(corr==0)*0.5
+
+case05.data= data.create ( n=n,p=p,split=split,beta=beta,sigma=sigma,corr=corr )
+X.list05=case05.data$X.list
+y.list05=case05.data$y.list
+
+
+
+### Case 3 ####
+# Data Generation #
+# 50 data sets, 70/70/60 = 200 observations, p=250 #
+# True model y=X %*% beta + sigma * epsilon, x[,i] & x[,j] with correlation 0.5, beta =c(runif(p/5, -2, 2 ), rep(0, p/5), runif(p/5, -2, 2 ),runif(p/5, -2, 2 ), rep(0, p/5) ), 250 predictors, epsilon ~ N(0,1), sigma=5 #
+
+# Create X #
+
+data.create = function( n,p,split,beta,sigma,corr ){
+	X.list = list( )
+	y.list= list()
+	
+	for (i in 1:split) {
+		X= mvrnorm( n=n, mu=rep(0,p ), Sigma=corr )
+		X.list[[i]] <- X
+		
+		epsilon =rnorm(1, mean = 0, sd = 1)
+		y = X %*% beta + sigma * epsilon
+		y.list[[i]] <- y
+	}
+	return( list(X.list=X.list, y.list=y.list) )
+}
+split=10
+n=200
+p=250
+beta = c(runif(p/5, -2, 2 ), rep(0, p/5), runif(p/5, -2, 2 ),runif(p/5, -2, 2 ), rep(0, p/5) )
+sigma =5
+
+n.train=70
+n.valid=70
+n.test=60
+
+corr=Diagonal( n = p, x=1 )
+corr=corr+ as.numeric(corr==0)*0.5
+
+case06.data= data.create ( n=n,p=p,split=split,beta=beta,sigma=sigma,corr=corr )
+X.list06=case06.data$X.list
+y.list06=case06.data$y.list
+
+
+######################################################################################################
+######################################################################################################
+#### Elastic Net/ Ridge/ Lasso through Data Augmentation and Accelerated Proximal Gradient Method ####
+######################################################################################################
+
+######################
+#### Data Rescale ####
+
+col.rescale=function(x){
+	mean.x=mean(x)
+	x.col.rescale=x
+	label=which (x!= mean(x) )
+	x.col.rescale[label]=(x[label] -mean(x))/sqrt( sum((x[label]-mean(x))^2) )
+	x.col.rescale[-label]=0
+	return( x.col.rescale )
+}
+
+data.rescale=function( x, y){
+	y.new=y-mean(y)
+	x.new= apply(x, 2, col.rescale ) 
+	return( list(x.new=x.new, y.new=y.new ) )
+}
+
+###########################
+#### Data Augmentation ####
+
+data.augm=function( x, y, lambda2 ){
+	X.star=( 1+ lambda2 )^(-1/2) * rbind(x, sqrt(lambda2)* as.matrix( Diagonal(n=p, x=1) )  )
+	y.star=c(y, rep(0, ncol(x) ) )
+	return( list (X.star=X.star, y.star=y.star ) )
+}
+
+##################################
+#### SVD for Cross Production ####
+
+# X = U D V'
+crossprod.SVD=function( X ){
+	svd.X=svd(X)
+	U=svd.X$u
+	D=diag(svd.X$d)
+	V=svd.X$v
+	X_X=V %*% D^2 %*% t(V)
+	
+	return( X_X )
+}
+
+crossprod.SVD.xy=function( X,y ){
+	svd.X=svd(X)
+	U=svd.X$u
+	D=diag(svd.X$d)
+	V=svd.X$v
+	X_y=V %*% D %*% t(U) %*% y
+	
+	return(  X_y )
+}
+
+###############################################
+#### proximal gradient algorithm for lasso ####
+
+
+obj <- function(y,X,beta,lambda){
+		A = y - X %*% beta
+		l = (1 / nrow(X)) * crossprod(A) 
+		phi = lambda * sum(abs(beta))
+		obj = l + phi
+		return(as.numeric(obj))
+}
+
+gradl <- function (y, X, beta){
+	grad = (1 / nrow(X)) * (crossprod(X) %*% beta - crossprod(X,y))
+#	grad = (1 / nrow(X)) * (crossprod.SVD(X) %*% beta - crossprod.SVD.xy(X, y))
+	return(grad)
+}
+
+prox <- function (X, gamma, lambda){
+	r = sign(X) * pmax(rep(0, length(X)), abs(X) - gamma * lambda)
+	return(r)
+}
+
+APG <- function(y,X,gamma , lambda , num.iteration , tol ){
+	p = ncol(X)
+	
+	# initialize values
+	beta_old = rep(0, p)
+	z_old = rep(0,p)
+	
+	# initialize matrix to hold all betas
+	beta.path = matrix(NA, nrow = num.iteration,ncol = p)
+	beta.path[1,] = beta_old
+	z.path = matrix(NA, nrow = num.iteration,ncol = p)
+	z.path[1,] = z_old
+	s = array(NA, dim = num.iteration)
+	s[1] = 1
+	
+	# create empty vector to stor objective value
+	objective = c()
+	
+	for (j in 2:num.iteration){
+		s[j] = 0.5 * (1 + sqrt(1 + 4 * s[j - 1] ^2))
+	}
+	
+	for (iter in 2: num.iteration){
+		gradient <- gradl(y, X, z.path[iter-1, ])
+		u <- z.path[iter-1, ] - gamma * gradient
+		
+		# Update beta
+		beta.path[iter, ] <- prox(u, gamma, lambda)
+		s[iter] <- (1 + sqrt(1 + 4 * s[iter-1]^2))/2
+		z.path[iter, ] <- beta.path[iter, ] + ((s[iter-1] - 1)/s[iter]) * (beta.path[iter, ] - beta.path[iter-1, ])
+		
+		# Compute log-likelihood
+		objective = c(objective, obj(y,X, beta.path[iter, ], lambda))
+		
+		if (abs(obj(y,X,beta.path[iter, ], lambda) - obj(y,X,beta.path[iter-1, ],lambda)) < tol){
+			break
+		}
+	}
+	return(list(beta = beta.path[iter,], objective = objective, iter = iter, betas = beta.path))
+}
+
+
+######################################
+#### Elastic Net Cross Validation ####
+
+elasticnet.cv.apg = function(y.list, X.list, split, lambda1, lambda2, n.train, n.valid, n.test){
+	
+	beta=matrix( 0, nrow=p, ncol=split )
+	lambda1.select=rep(0,split)
+	lambda2.select=rep(0,split)
+	err.select=c()
+	
+	length.lambda2=length(lambda2)
+	length.lambda1=length(lambda1)
+	
+    for(i in 1:split){
+		
+		err.fraction.select=c()
+		
+		# Validating Set #
+		X.valid=X.list[[i]][(n.train+1):(n.train+n.valid),]
+		y.valid=y.list[[i]][(n.train+1):(n.train+n.valid)]
+		data.rescale.valid=data.rescale(X.valid, y.valid)
+		X.valid.new=data.rescale.valid$x.new
+		y.valid.new=data.rescale.valid$y.new
+		
+		MSE=100000
+		# Fit the lasso model and select tuning parameters #
+		for (j in 1: length.lambda2 ){
+			data.train=data.augm( x=X.list[[i]][1:n.train,], y=y.list[[i]][1:n.train], lambda2[j] )
+			# Training set #
+			X.train=data.train$X.star
+			y.train=data.train$y.star
+			data.rescale.train=data.rescale(X.train, y.train)
+			X.train.new=data.rescale.train$x.new
+			y.train.new=data.rescale.train$y.new
+			for(k in 1:length.lambda1 ){
+				lambda=lambda1[k] / sqrt(1+lambda2[j] )
+				fit.apg=APG(y.train.new,X.train.new, gamma = 0.001 , lambda = lambda, num.iteration =500, tol = 1e-5)
+				beta.t=sqrt(1+lambda2[j] ) * fit.apg$beta
+				MSE.t=mean( ( X.valid.new %*% beta.t - y.valid.new)^2)
+				if (MSE.t <MSE){
+					MSE=MSE.t
+					beta[,i]=beta.t
+					lambda1.select[i]=lambda1[k]
+					lambda2.select[i]=lambda2[j]
+				}
+			}
+		}
+		
+		# Make prediction on the test set #
+		X.test=X.list[[i]][-1:-(n.train+n.valid),]
+		y.test=y.list[[i]][-1:-(n.train+n.valid)]
+		data.rescale.test=data.rescale(X.test, y.test)
+		X.test.new=data.rescale.test$x.new
+		y.test.new=data.rescale.test$y.new
+		pred.select = X.test.new %*% beta[,i]
+    
+		# Calculate MSE on test set #
+		prederr.select=mean( (pred.select - y.test.new)^2)
+		err.select=c( err.select , prederr.select )
+	}
+	
+	return(list(  beta=beta , err.select=err.select , lambda1.select=lambda1.select, lambda2.select=lambda2.select ) )
+}
+
+
+###############################
+###############################
+#### Elastic Net beta Path ####
+###############################
+
+elasticnet.cv.apg.betapath = function(y, X, maxiter, lambda1, lambda2){
+	
+	obj.path=c()
+	beta.path = rep(50,p)
+	length.lambda1=length(lambda1)
+	length.lambda2=length(lambda2)
+	
+	data.new=data.rescale(X, y)
+	X.new=data.new$x.new
+	y.new=data.new$y.new
+	
+	if( length.lambda2>1 ){
+		
+		for (j in 1: length.lambda2 ){
+			data.star=data.augm( x=X.new, y=y.new, lambda2[j] )
+			X.star=data.star$X.star
+			y.star=data.star$y.star
+			lambda=lambda1/ sqrt(1+lambda2[j] )
+			fit.apg=APG(y.star,X.star, gamma = 0.1 , lambda = lambda, num.iteration =maxiter, tol = 1e-8)
+			beta.path= cbind(beta.path,fit.apg$beta )
+			iter=fit.apg$iter
+			obj.path=c(obj.path , fit.apg$objective[iter-1] )
+		}
+	}
+	
+	else if ( length.lambda1>1 ) {
+		for (k in 1: length.lambda1 ){
+			lambda=lambda1[k] / sqrt(1+lambda2 )
+			fit.apg=APG(y.new,X.new, gamma = 0.1 , lambda = lambda, num.iteration =maxiter, tol = 1e-8)
+			beta.path= cbind(beta.path,fit.apg$beta )
+			iter=fit.apg$iter
+			obj.path=c(obj.path , fit.apg$objective[iter-1]  )
+		}
+	}
+    
+	else print("No Path")
+	
+	return(list(  beta.path=beta.path , obj.path=obj.path  ) )
+}
+
+
+
+#########################################
+#########################################
+#### Calculate Importance beta ratio ####
+#########################################
+
+ratio=function(beta.i){
+	beta.i.ratio=abs(beta.i)/sum(abs(beta.i) )
+	return(beta.i.ratio)
+}
+
+
+#################################
+#################################
+#### Calculate beta Sparsity ####
+#################################
+
+sparse.ratio=function(beta.i){
+	sparse.i.ratio=sum(as.numeric( beta.i==0 ))/length(beta.i) 
+	return(sparse.i.ratio)
+}
+
+############################
+############################
+#### Case 01 Result ########
+############################
+
+n.train=20
+n.valid=20
+n.test=200
+n=240
+p=8
+
+#### lambda grids ####
+lambda1=c(seq(from=0.1, to=2, length.out=5),3,5)
+#lambda1=0
+lambda2=c(seq(from=0.01, to=1, length.out=5),1,2)
+#lambda2=0
+
+#### Elastic Net through Data Augmentation and APG for Case 01 ####
+elasticnet.cv.apg.case01=elasticnet.cv.apg(y.list01, X.list01, split, lambda1, lambda2, n.train=n.train, n.valid=n.valid, n.test=n.test)
+elasticnet.cv.apg.case01$beta
+elasticnet.cv.apg.case01$err.select
+median(elasticnet.cv.apg.case01$err.select)
+elasticnet.cv.apg.case01$beta
+elasticnet.cv.apg.case01$lambda1.select
+elasticnet.cv.apg.case01$lambda2.select
+
+#### Importance Ratio Plot ####
+apg.case01.beta.ratio=apply(elasticnet.cv.apg.case01$beta, 2, ratio)
+case01.beta.ratio=ratio(beta)
+
+# Plot #
+par(mfrow=c(4,2) )
+for (t in 1:p){
+	ts.plot(apg.case01.beta.ratio[t,] , col=t, type="l", xlab="Data set 1 - 30" ,ylab="|beta[t]|/sum(|beta[t]|)")
+	abline(h=case01.beta.ratio[t], col=t )
+}
+
+#### Sparse Ratio ####
+apg.case01.sparse.ratio=apply(elasticnet.cv.apg.case01$beta, 2, sparse.ratio)
+
+#### beta Path ####
+lambda1=seq(from=0.0, to=0.5, length.out=100)
+#lambda1=0.05
+#lambda2=seq(from=0.01, to=15, length.out=100)
+lambda2=0.1
+
+n=240
+p=8
+
+beta.path=elasticnet.cv.apg.betapath(y=y.list01[[1]] , X=X.list01[[1]] , maxiter=500, lambda1=lambda1, lambda2=lambda2)$beta.path
+
+# Plot Path #
+ts.plot(beta.path[1,1:50], col=1,  ylim=c(0, 50) )
+for(i in 1:p){
+	lines( beta.path[i,1:50], col=i )
+}
+
+
+############################
+############################
+#### Case 02 Result ########
+############################
+
+n=300
+p=300
+n.train=100
+n.valid=100
+n.test=100
+
+lambda1=c(seq(from=0.01, to=1, length.out=3),1.5,3)
+#lambda1=0
+lambda2=c(seq(from=0.01, to=1, length.out=3),2,4)
+#lambda2=0
+
+elasticnet.cv.apg.case05=elasticnet.cv.apg(y.list05, X.list05, split, lambda1, lambda2, n.train=n.train, n.valid=n.valid, n.test=n.test)
+#elasticnet.cv.apg.case05$beta
+elasticnet.cv.apg.case05$err.select
+median(elasticnet.cv.apg.case05$err.select)
+elasticnet.cv.apg.case05$beta
+elasticnet.cv.apg.case05$lambda1.select
+elasticnet.cv.apg.case05$lambda2.select
+
+
+############################
+############################
+#### Case 03 Result ########
+############################
+
+n=200
+p=250
+n.train=70
+n.valid=70
+n.test=60
+
+lambda1=c(seq(from=0.01, to=1, length.out=3),1.5,3)
+#lambda1=0
+lambda2=c(seq(from=0.01, to=1, length.out=3),2,4)
+#lambda2=0
+
+elasticnet.cv.apg.case06=elasticnet.cv.apg(y.list06, X.list06, split, lambda1, lambda2, n.train=n.train, n.valid=n.valid, n.test=n.test)
+
+elasticnet.cv.apg.case06$err.select
+median(elasticnet.cv.apg.case06$err.select)
+elasticnet.cv.apg.case06$beta
+elasticnet.cv.apg.case06$lambda1.select
+elasticnet.cv.apg.case06$lambda2.select
+
+
+
+######################################################################################################
+######################################################################################################
+#### Elastic Net/ Ridge/ Lasso through "enet" ########################################################
+######################################################################################################
+
+# Elastic Net Validation #
+enet.crossvalidation = function(y.list, X.list, split, lambda2, n.train, n.valid, n.test){
+	
+	beta=matrix( 0, nrow=p, ncol=split )
+	lambda.select=c()
+	fraction.select=c()
+	err.select=c()
+	fraction=c()
+	
+	length.lambda2=length(lambda2)
+	
+    for(i in 1:split){
+	
+		err.fraction.select=c()
+		
+		# Training set #
+		X.train=X.list[[i]][1:n.train,]
+		y.train=y.list[[i]][1:n.train]
+		# Validating Set #
+		X.valid=X.list[[i]][(n.train+1):(n.train+n.valid),]
+		y.valid=y.list[[i]][(n.train+1):(n.train+n.valid)]
+
+		# Fit the lasso model and select tuning parameter "fraction" #
+		for (j in 1: length.lambda2 ){
+			fit.train = enet(x = X.train, y = y.train, lambda = lambda2[j])
+			# Make prediction on validating set #
+			pred = predict(fit.train, newx = X.valid)
+			# Calculate MSE on validating set #
+			prederr=colMeans( (pred$fit - y.valid)^2)
+			# Select tuning parameter lambda1 through fraction s #
+			smallest=which.min( as.vector(prederr)  )
+			fraction.i=pred$fraction[smallest]
+			fraction.select=c(fraction.select, fraction.i )
+			err.fraction.select=c( err.fraction.select, min(prederr ))
+		}
+		
+		# Select tuning parameter lambda2 through fraction s #
+		smallest.lambda2=which.min(err.fraction.select)
+		lambda.select=c( lambda.select, lambda2[smallest.lambda2 ]  )
+		fraction=c(fraction, fraction.select[smallest.lambda2 ]  )
+		
+		beta[,i] = predict(fit.train, newx=X.valid, s=fraction.select[smallest.lambda2 ] , type =  "coefficients", mode = "fraction" ,naive=FALSE, intercept=T)$coefficients # Correspondent beta #
+
+
+		# Make prediction on the test set #
+		X.test=X.list[[i]][-1:-(n.train+n.valid),]
+		y.test=y.list[[i]][-1:-(n.train+n.valid)]
+		fit.select = enet(x = X.train, y = y.train, lambda = lambda2[smallest.lambda2 ] )
+		pred.select = predict(fit.select, newx = X.test, s=fraction.select[smallest.lambda2 ] , mode = "fraction")
+		# Calculate MSE on test set #
+		prederr.select=mean( (pred.select$fit - y.test)^2)
+		err.select=c( err.select , prederr.select )
+    }
+    
+	return(list(  beta=beta , err.select=err.select, lambda.select=lambda.select, fraction=fraction ) )
+}
+
+
+#########################
+#### Case 01 Results ####
+#########################
+
+n.train=20
+n.valid=20
+n.test=200
+n=240
+p=8
+
+lambda2=c(seq(from=0, to=5, by=0.5), 10,15,50, 100)
+enet.cv.case01=enet.crossvalidation(y.list01, X.list01, split, lambda2, n.train=n.train, n.valid=n.valid, n.test=n.test)
+enet.cv.case01$err.select
+median(enet.cv.case01$err.select)
+
+
+#########################
+#### Case 02 Results ####
+#########################
+
+n=300
+p=300
+n.train=100
+n.valid=100
+n.test=100
+
+lambda2=c(seq(from=0, to=5, by=0.5), 10,15,50, 100)
+enet.cv.case05=enet.crossvalidation(y.list05, X.list05, split, lambda2, n.train=n.train, n.valid=n.valid, n.test=n.test)
+enet.cv.case05$err.select
+median(enet.cv.case05$err.select)
+
+
+#########################
+#### Case 03 Results ####
+#########################
+
+n=200
+p=250
+n.train=70
+n.valid=70
+n.test=60
+
+lambda2=c(seq(from=0, to=5, by=0.5), 10,15,50, 100)
+enet.cv.case06=enet.crossvalidation(y.list06, X.list06, split, lambda2, n.train=n.train, n.valid=n.valid, n.test=n.test)
+enet.cv.case06$err.select
+median(enet.cv.case06$err.select)
+
+
+
+######################################################################################################
+######################################################################################################
+#### Elastic Net/ Ridge/ Lasso through "lars" ########################################################
+######################################################################################################
+
+lars.crossvalidation = function(y.list, X.list, split, lambda2, n.train, n.valid, n.test){
+	
+	beta=matrix( 0, nrow=p, ncol=split )
+	lambda2.select=rep(0,split)
+	err.select=rep(10000,split)
+	pred.test=matrix( 0, nrow=n.test, ncol=split )
+	fraction.select=rep(0,split)
+	
+	length.lambda2=length(lambda2)
+	
+    for(i in 1:split){
+		
+		# Validating Set #
+		X.valid=X.list[[i]][(n.train+1):(n.train+n.valid),]
+		y.valid=y.list[[i]][(n.train+1):(n.train+n.valid)]
+		# Make prediction on the test set #
+		X.test=X.list[[i]][-1:-(n.train+n.valid),]
+		y.test=y.list[[i]][-1:-(n.train+n.valid)]
+		
+		# Fit the lasso model and select tuning parameter "fraction" #
+		for (j in 1: length.lambda2 ){
+			data.train=data.augm( x=X.list[[i]][1:n.train,], y=y.list[[i]][1:n.train], lambda2[j] )
+			# Training set #
+			X.train=data.train$X.star
+			y.train=data.train$y.star
+						
+			fit.train = lars(X.train, y.train, type = "lar")
+			# Make prediction on validating set #
+			pred = predict(fit.train, newx = X.valid)
+			# Calculate MSE on validating set #
+			prederr=colMeans( (pred$fit - y.valid)^2)
+			# Select tuning parameter lambda1 through fraction s #
+			smallest=which.min( as.vector(prederr)  )
+			prederr.smallest=min( as.vector(prederr)  )
+			prederr.smallest
+			if( prederr.smallest < err.select[i] ){
+				pred.test.t=predict( fit.train, newx=X.test, s=smallest )
+				pred.test[,i]=pred.test.t$fit
+				beta[,i]=fit.train$beta[smallest,]
+				err.select[i]=mean((y.test-pred.test[,i])^2)
+				lambda2.select[i] = lambda2[j]
+				fraction.select[i]=pred.test.t$fraction
+			}
+		}
+   }
+    
+	return(list(  beta=beta , err.select=err.select, lambda2.select=lambda2.select, fraction.select=fraction.select ) )
+}
+
+
+#########################
+#### Case 01 Results ####
+#########################
+
+n.train=20
+n.valid=20
+n.test=200
+n=240
+p=8
+
+lambda2=c(seq(from=0, to=5, by=0.5), 10,15,50, 100)
+
+lars.cv.case01=lars.crossvalidation(y.list01, X.list01, split, lambda2, n.train=n.train, n.valid=n.valid, n.test=n.test)
+lars.cv.case01$err.select
+median(lars.cv.case01$err.select)
+
+
+#########################
+#### Case 02 Results ####
+#########################
+
+n=300
+p=300
+n.train=100
+n.valid=100
+n.test=100
+
+lambda2=c(seq(from=0, to=5, by=0.5), 10,15,50, 100)
+lars.cv.case05=lars.crossvalidation(y.list05, X.list05, split, lambda2, n.train=n.train, n.valid=n.valid, n.test=n.test)
+lars.cv.case05$err.select
+median(lars.cv.case05$err.select)
+
+
+#########################
+#### Case 03 Results ####
+#########################
+
+n=200
+p=250
+n.train=70
+n.valid=70
+n.test=60
+
+lambda2=c(seq(from=0, to=5, by=0.5), 10,15,50, 100)
+lars.cv.case06=lars.crossvalidation(y.list06, X.list06, split, lambda2, n.train=n.train, n.valid=n.valid, n.test=n.test)
+lars.cv.case06$err.select
+median(lars.cv.case06$err.select)
